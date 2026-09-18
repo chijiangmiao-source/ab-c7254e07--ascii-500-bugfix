@@ -492,6 +492,68 @@ def test_unknown_session_content_404(client):
     assert r.json()["error"]["code"] == "session_not_found"
 
 
+# ------------------------------------------- non-ASCII (Unicode) filenames
+
+
+def test_unicode_filename_complete_session_downloads_200_with_safe_disposition(
+    client,
+):
+    # Acceptance: the create endpoint accepts a Unicode filename, so every
+    # content response must stay Latin-1-encodable -- an ASCII-safe filename=
+    # fallback plus the UTF-8 filename* parameter (RFC 6266/5987), never a
+    # 500 from header encoding.
+    content = _content(180, "探伤".encode())
+    r = make_upload(client, content, len(content), filename="探伤报告.bin")
+    assert r.status_code == 201, r.text
+    s = r.json()
+    assert s["total_chunks"] == 1 and s["filename"] == "探伤报告.bin"
+    uid = s["upload_id"]
+
+    ack = put_chunk(client, uid, 0, content)
+    assert ack.status_code == 200, ack.text
+    assert ack.json()["complete"] is True
+    assert status(client, uid).json()["status"] == "complete"
+
+    expected_cd = (
+        'attachment; filename="____.bin"; '
+        "filename*=UTF-8''%E6%8E%A2%E4%BC%A4%E6%8A%A5%E5%91%8A.bin"
+    )
+
+    # No Range on the complete session: 200 with the original bytes.
+    whole = _get(client, uid, None)
+    assert whole.status_code == 200
+    assert whole.content == content
+    assert whole.headers["content-disposition"] == expected_cd
+    # The exact property Starlette relies on when emitting the header.
+    whole.headers["content-disposition"].encode("latin-1")
+
+    # Same guarantee on the ranged (206) and multipart paths, which build
+    # the header independently.
+    single = _get(client, uid, "bytes=10-29")
+    assert single.status_code == 206
+    assert single.content == content[10:30]
+    assert single.headers["content-disposition"] == expected_cd
+
+    multi = _get(client, uid, "bytes=0-9,100-109")
+    assert multi.status_code == 206
+    assert multi.headers["content-disposition"] == expected_cd
+
+
+def test_ascii_filename_disposition_keeps_quoted_name(client):
+    content = _content(120, b"ascii-name")
+    s = _open_session(client, content, 120, filename='rep "q" axle.bin')
+    uid = s["upload_id"]
+    _confirm(client, uid, split(content, 120), [0])
+    r = _get(client, uid, None)
+    assert r.status_code == 200
+    cd = r.headers["content-disposition"]
+    cd.encode("latin-1")  # must always be header-encodable
+    assert cd == (
+        "attachment; filename=\"rep _q_ axle.bin\"; "
+        "filename*=UTF-8''rep%20%22q%22%20axle.bin"
+    )
+
+
 def test_expired_open_session_still_serves_confirmed_ranges_but_not_gaps(client):
     s = _open_session(client, _content(250, b"exp"), 100, expires_in=1)
     uid = s["upload_id"]

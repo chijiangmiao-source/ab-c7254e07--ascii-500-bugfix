@@ -407,6 +407,43 @@ def main() -> int:
     check("healthy chunk still previewable",
           r.status_code == 206 and r.content == corrupt[0:10], r.text[:120])
 
+    # ---- 7. Unicode filename: content must never 500 on header encoding ----
+    print("[7] unicode filename -> 200 with ASCII fallback + UTF-8 filename*")
+    uname = "探伤报告.bin"
+    ucontent = payload(4096, seed=20260918)  # non-empty, single chunk
+    usess = create(client, ucontent, filename=uname)
+    uok = (usess.get("total_chunks") == 1 and usess.get("filename") == uname)
+    check("unicode filename single-chunk session created",
+          usess.get("upload_id") is not None and uok, str(usess)[:200])
+    u_uid = usess["upload_id"]
+    r = put(client, u_uid, 0, ucontent)
+    check("only chunk uploaded -> session complete",
+          r.status_code == 200 and r.json().get("complete") is True, r.text[:200])
+    check("status complete for unicode session",
+          client.get(f"/api/v1/uploads/{u_uid}").json()["status"] == "complete", "")
+
+    expected_cd = ("attachment; filename=\"____.bin\"; "
+                   "filename*=UTF-8''%E6%8E%A2%E4%BC%A4%E6%8A%A5%E5%91%8A.bin")
+    # No Range on the complete session: the previously 500ing request.
+    r = client.get(f"/api/v1/uploads/{u_uid}/content")
+    cd = r.headers.get("content-disposition", "")
+    try:
+        cd.encode("latin-1")
+        latin1_ok = True
+    except UnicodeEncodeError:
+        latin1_ok = False
+    check("GET content without Range -> 200 + original bytes",
+          r.status_code == 200 and r.content == ucontent,
+          f"status={r.status_code} body={r.text[:120] if r.status_code != 200 else ''}")
+    check("Content-Disposition ASCII fallback + UTF-8 filename*",
+          cd == expected_cd and latin1_ok, cd)
+    # Ranged paths build the header independently; same guarantee applies.
+    r = client.get(f"/api/v1/uploads/{u_uid}/content", headers={"Range": "bytes=0-9"})
+    check("ranged GET on unicode session -> 206 + safe disposition",
+          r.status_code == 206 and r.content == ucontent[:10]
+          and r.headers.get("content-disposition") == expected_cd,
+          f"status={r.status_code} cd={r.headers.get('content-disposition')}")
+
     print(f"\n== {_passed} passed, {len(_failed)} failed ==")
     if _failed:
         for item in _failed:

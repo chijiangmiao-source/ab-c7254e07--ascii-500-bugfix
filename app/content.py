@@ -41,9 +41,23 @@ def _etag(session: dict) -> str:
     return f'"{session["file_sha256"]}"'
 
 
+def _ascii_fallback(filename: str) -> str:
+    # RFC 6266: the legacy filename= parameter must stay ASCII, or Starlette
+    # cannot Latin-1-encode the header (a raw Unicode name would 500 the
+    # response). Non-ASCII bytes, quotes, backslashes and control characters
+    # collapse to "_"; the genuine name travels in filename* (RFC 5987).
+    fallback = "".join(
+        ch if 0x20 <= ord(ch) < 0x7F and ch not in '"\\' else "_"
+        for ch in filename
+    )
+    return fallback or "download"
+
+
 def _content_disposition(filename: str) -> str:
-    safe = filename.replace("\\", "\\\\").replace('"', '\\"')
-    return f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(filename)}"
+    return (
+        f'attachment; filename="{_ascii_fallback(filename)}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
 
 
 def _unsatisfiable(size: int, message: str, raw_range: str) -> RangeNotSatisfiable:

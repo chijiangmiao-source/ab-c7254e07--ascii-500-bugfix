@@ -165,6 +165,9 @@ curl -sS http://localhost:8000/api/v1/uploads/$UID
 - 非法或全部不可满足的范围 → `416 range_not_satisfiable`，并带
   `Content-Range: bytes */<总大小>`（多段中仅个别越界时忽略越界段）；
 - 完成会话不带 `Range` → `200` 流式返回原子发布的成品文件；
+- 成功响应都带 `Content-Disposition: attachment`：非 ASCII 文件名按 RFC 6266/5987
+  以 ASCII 安全回退值（`filename="____.bin"`）加 UTF-8 百分号编码的
+  `filename*=UTF-8''...` 表达，响应头始终可安全编码；
 - **完成前后对同一区间返回完全相同的字节与 ETag**（预检即可当作正式取数）。
 
 ```bash
