@@ -427,6 +427,66 @@ def test_zero_byte_file_content_is_empty_200(client):
     assert r.headers["content-length"] == "0"
 
 
+# --------------------------------------------- non-ASCII (Unicode) filenames
+
+
+def _parse_content_disposition(header: str) -> tuple[str, str | None]:
+    """Return the legacy ``filename`` and RFC 5987 ``filename*`` values."""
+    m = re.search(r'filename="([^"]*)"', header)
+    assert m, header
+    legacy = m.group(1)
+    m_star = re.search(r"filename\*=UTF-8''([^;]+)", header)
+    return legacy, (m_star.group(1) if m_star else None)
+
+
+def test_unicode_filename_full_download_200_with_ascii_safe_headers(client):
+    # A non-empty, single-chunk upload with a legal Unicode name must download
+    # as 200: Starlette encodes header values as Latin-1, so the legacy
+    # filename= parameter has to be ASCII while filename* carries the name.
+    from urllib.parse import unquote
+
+    name = "探伤报告.bin"
+    content = _content(300, b"unicode-full")
+    s = _open_session(client, content, 1024, filename=name)
+    uid = s["upload_id"]
+    assert s["total_chunks"] == 1  # single-chunk session
+    r = put_chunk(client, uid, 0, content)  # the only chunk completes it
+    assert r.status_code == 200, r.text
+    assert status(client, uid).json()["status"] == "complete"
+
+    r = _get(client, uid, None)
+    assert r.status_code == 200
+    assert r.content == content
+
+    cd = r.headers["content-disposition"]
+    cd.encode("ascii")  # must not raise: the whole header is Latin-1-safe
+    legacy, star = _parse_content_disposition(cd)
+    legacy.encode("ascii")  # fallback is pure ASCII
+    assert star is not None
+    assert unquote(star, encoding="utf-8") == name
+    assert legacy.endswith(".bin")
+
+
+def test_unicode_filename_range_response_headers_are_ascii_safe(client):
+    # The same header is built for 206 responses, so ranges must not 500 either.
+    from urllib.parse import unquote
+
+    name = "探伤报告.bin"
+    content = _content(250, b"unicode-range")
+    s = _open_session(client, content, 100, filename=name)
+    uid = s["upload_id"]
+    _confirm(client, uid, split(content, 100), range(3))
+
+    r = _get(client, uid, "bytes=10-19")
+    assert r.status_code == 206
+    assert r.content == content[10:20]
+    cd = r.headers["content-disposition"]
+    cd.encode("ascii")
+    legacy, star = _parse_content_disposition(cd)
+    legacy.encode("ascii")
+    assert unquote(star, encoding="utf-8") == name
+
+
 # -------------------------------------------------- before/after publication parity
 
 

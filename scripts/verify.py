@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+from urllib.parse import unquote
 
 API_BASE = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -406,6 +407,55 @@ def main() -> int:
     r = client.get(f"/api/v1/uploads/{cuid}/content", headers={"Range": "bytes=0-9"})
     check("healthy chunk still previewable",
           r.status_code == 206 and r.content == corrupt[0:10], r.text[:120])
+
+    # ---- 7. legal Unicode filename must not break content download ---------
+    print("[7] non-ASCII filename: create -> single chunk -> GET content")
+    import re
+
+    uni_name = "探伤报告.bin"
+    uni = payload(12345, seed=20260918)  # non-empty, smaller than one chunk
+    usess = create(client, uni, filename=uni_name)
+    uuid_ = usess["upload_id"]
+    check("unicode-name session is single-chunk",
+          usess["total_chunks"] == 1, str(usess["total_chunks"]))
+    r = put(client, uuid_, 0, uni)
+    check("only chunk completes unicode-name session",
+          r.status_code == 200 and r.json().get("complete") is True, r.text)
+    check("unicode-name session status complete",
+          client.get(f"/api/v1/uploads/{uuid_}").json()["status"] == "complete", "")
+
+    # The regression: without a Range header the full download used to 500
+    # because Starlette Latin-1-encodes response headers and the raw Unicode
+    # name sat inside filename="...".
+    r = client.get(f"/api/v1/uploads/{uuid_}/content")
+    check("unicode-name GET without Range -> 200 original bytes",
+          r.status_code == 200 and r.content == uni,
+          f"status={r.status_code}")
+    cd = r.headers.get("content-disposition", "")
+    try:
+        cd.encode("ascii")
+        header_ascii = True
+    except UnicodeEncodeError:
+        header_ascii = False
+    m_legacy = re.search(r'filename="([^"]*)"', cd)
+    m_star = re.search(r"filename\*=UTF-8''([^;]+)", cd)
+    legacy_ok = bool(m_legacy)
+    try:
+        if m_legacy:
+            m_legacy.group(1).encode("ascii")
+    except UnicodeEncodeError:
+        legacy_ok = False
+    star_ok = bool(m_star) and unquote(m_star.group(1), encoding="utf-8") == uni_name
+    check("Content-Disposition header is ASCII-safe (no Latin-1 encode error)",
+          header_ascii, cd)
+    check("legacy filename= is an ASCII fallback", legacy_ok, cd)
+    check("filename* carries the original UTF-8 name", star_ok, cd)
+
+    # Same header family is used for 206 range responses.
+    r = client.get(f"/api/v1/uploads/{uuid_}/content", headers={"Range": "bytes=0-9"})
+    check("unicode-name range -> 206 with ASCII-safe disposition",
+          r.status_code == 206 and r.content == uni[0:10]
+          and r.headers["content-disposition"].encode("ascii"), r.text[:120])
 
     print(f"\n== {_passed} passed, {len(_failed)} failed ==")
     if _failed:

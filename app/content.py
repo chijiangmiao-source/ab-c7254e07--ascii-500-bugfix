@@ -41,9 +41,26 @@ def _etag(session: dict) -> str:
     return f'"{session["file_sha256"]}"'
 
 
+def _ascii_filename(filename: str) -> str:
+    """Lossy pure-ASCII fallback for the legacy ``filename=`` parameter.
+
+    RFC 6266 carries the real name in ``filename*`` (percent-encoded UTF-8);
+    ``filename=`` is the fallback for agents without ``filename*`` support and
+    HTTP header values must be Latin-1, so every non-printable-ASCII character
+    is replaced rather than passed through.
+    """
+    fallback = "".join(
+        ch if 32 <= ord(ch) < 127 and ch not in '\\"' else "_"
+        for ch in filename
+    ).strip()
+    return fallback or "upload.bin"
+
+
 def _content_disposition(filename: str) -> str:
-    safe = filename.replace("\\", "\\\\").replace('"', '\\"')
-    return f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(filename)}"
+    return (
+        f"attachment; filename=\"{_ascii_filename(filename)}\"; "
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
 
 
 def _unsatisfiable(size: int, message: str, raw_range: str) -> RangeNotSatisfiable:
